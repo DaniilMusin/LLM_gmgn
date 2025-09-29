@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+data/
+*.parquet
+*.csv
+config/*.yaml
+!config/config.example.yaml
+!config/keys.example.yaml
