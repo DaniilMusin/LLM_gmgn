@@ -8,3 +8,6 @@ data/
 config/*.yaml
 !config/config.example.yaml
 !config/keys.example.yaml
+*.egg-info/
+build/
+dist/
