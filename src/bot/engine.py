@@ -136,6 +136,15 @@ class Orchestrator:
 
     async def _loop_decisions(self):
         while True:
+            # Circuit breaker check - ONE TIME before processing candidates
+            if settings.risk.circuit_breaker_enabled:
+                cb_open, cb_reason = is_circuit_open()
+                if cb_open:
+                    try: await send_alert(f"⚠️ Circuit breaker: {cb_reason}")
+                    except Exception: pass
+                    await asyncio.sleep(60)  # Wait 1 minute before next check
+                    continue
+
             candidates = list(self.hype.posts.keys())[:10]
             for sym in candidates:
                 hype_val, hype_meta = self.hype.hype_score(sym)
@@ -145,13 +154,6 @@ class Orchestrator:
                 if bl: continue
                 fr, why = fails_risk_gates(mkt.liq_usd, mkt.txns_h1, mkt.spread_bps)
                 if fr: continue
-                # Circuit breaker check
-                if settings.risk.circuit_breaker_enabled:
-                    cb_open, cb_reason = is_circuit_open()
-                    if cb_open:
-                        try: await send_alert(f"⚠️ Circuit breaker: {cb_reason}")
-                        except Exception: pass
-                        continue
                 nitems = self.news_cache.get(sym, [])
                 has_confirmed = any((d in it["url"]) for it in nitems for d in ["coindesk.com","cointelegraph.com","decrypt.co"])
                 nscore = news_score(has_confirmed, len(nitems))
@@ -180,7 +182,10 @@ class Orchestrator:
                     except Exception: pass
                     continue
                 # Adjust position size if needed
-                proposed_size_wsol = get_size_sol() if settings.execution.default_input_token.upper() == "WSOL" else (get_size_usdc() / 100.0)
+                # NOTE: For USDC input, we need approximate WSOL equivalent for risk checks
+                # Assuming ~150 USDC/SOL average rate: 1 WSOL ≈ 150 USDC
+                USDC_PER_WSOL = 150.0
+                proposed_size_wsol = get_size_sol() if settings.execution.default_input_token.upper() == "WSOL" else (get_size_usdc() / USDC_PER_WSOL)
                 adjusted_size, size_warning = get_max_position_size(proposed_size_wsol)
                 if size_warning:
                     try: await send_alert(f"⚠️ {size_warning}")
@@ -192,7 +197,7 @@ class Orchestrator:
                                                  anti_mev=settings.execution.gmgn_anti_mev, priority_fee_sol=settings.execution.sol_priority_fee_sol)
                     else:
                         plan = to_execution_plan(dec, in_asset=settings.execution.default_input_token,
-                                                 size_sol=get_size_sol(), size_usdc=adjusted_size * 100.0,
+                                                 size_sol=get_size_sol(), size_usdc=adjusted_size * USDC_PER_WSOL,
                                                  anti_mev=settings.execution.gmgn_anti_mev, priority_fee_sol=settings.execution.sol_priority_fee_sol)
                 try:
                     res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""),
@@ -211,6 +216,11 @@ class Orchestrator:
                     try: await send_alert(f"✅ Buy {sym} opened/added qty={qty:.6f}")
                     except Exception: pass
                 except Exception as e:
+                    # Record entry failure to circuit breaker - at minimum we lost gas fees
+                    if settings.risk.circuit_breaker_enabled:
+                        # Estimate gas loss: ~0.001 WSOL for failed transaction
+                        estimated_gas_loss = -0.001
+                        record_trade(estimated_gas_loss, plan.out_token)
                     try: await send_alert(f"❌ EXEC buy: {e}")
                     except Exception: pass
             await asyncio.sleep(15)
@@ -240,6 +250,7 @@ class Orchestrator:
                     opened_at = pos["opened_at"]
                     # Mark: quote token->WSOL
                     exp_wsol = 0.0
+                    quote_failed = False
                     try:
                         amt = int(qty * (10**decimals))
                         r = await gmgn_get_route_sol(contract, WSOL, amt, from_addr=(settings.solana.address or ""), slippage_pct=settings.execution.slippage_base_pct)
@@ -248,8 +259,17 @@ class Orchestrator:
                             if k_ in q:
                                 try: exp_wsol = float(q.get(k_)) / LAMPORTS; break
                                 except Exception: pass
-                    except Exception:
-                        pass
+                        if exp_wsol <= 0:
+                            quote_failed = True
+                    except Exception as e:
+                        quote_failed = True
+                        try: await send_alert(f"⚠️ Quote error for {symbol}: {e}")
+                        except Exception: pass
+
+                    # Skip this position if quote failed - cannot make exit decisions
+                    if quote_failed:
+                        continue
+
                     current_ret = (exp_wsol - invested) / max(1e-9, invested) if invested>0 else 0.0
                     # HWM update
                     hwm_wsol = float(pos["hwm_wsol"] or 0.0)
@@ -261,31 +281,41 @@ class Orchestrator:
                     tp1_done = bool(pos["tp1_done"]); tp2_done = bool(pos["tp2_done"])
                     # Market snapshot
                     m = self.market_cache.get(symbol)
-                    spread_ok = True; txns_ok = True
-                    if m:
-                        if m.spread_bps is not None and m.spread_bps > 1.5 * settings.risk.max_spread_bps:
-                            spread_ok = False
-                        if m.txns_h1 is not None and int(pos["entry_txns_h1"] or 0) > 0:
-                            txns_ok = (m.txns_h1 >= 0.5 * int(pos["entry_txns_h1"]))
-                    # Recent AMM PI
+
+                    # Pre-calculate market stress conditions
+                    stress_spread = m and m.spread_bps is not None and m.spread_bps > 1.5 * settings.risk.max_spread_bps
+                    stress_txns = m and m.txns_h1 is not None and int(pos["entry_txns_h1"] or 0) > 0 and m.txns_h1 < 0.5 * int(pos["entry_txns_h1"])
                     recent_min_pi = get_recent_amm_pi(contract, minutes=60) or 0.0
-                    amm_ok = recent_min_pi >= -8.0
-                    # Hype downgrade
-                    hype_val, hype_meta = self.hype.hype_score(symbol)
-                    z_sum = (hype_meta.get("z_m",0)+hype_meta.get("z_a",0)+hype_meta.get("z_e",0))
-                    nitems = self.news_cache.get(symbol, [])
-                    has_confirmed = any((d in it["url"]) for it in nitems for d in ["coindesk.com","cointelegraph.com","decrypt.co"])
-                    nscore = news_score(has_confirmed, len(nitems))
-                    mscore = market_score(m.liq_usd if m else 0.0, m.vol_1h if m else 0.0, m.ret_5m if m else 0.0, m.price_change_1h if m else 0.0, m.spread_bps if m else None, m.txns_h1 if m else None)
-                    dscore = decision_score(hype_val, mscore, nscore)
+                    stress_amm = recent_min_pi < -8.0
+
+                    # Hype downgrade - OPTIMIZED: Only check every 5 minutes to reduce LLM costs
+                    from datetime import datetime as _dt
+                    last_check_ts = pos.get("last_check_ts")
+                    should_check_downgrade = True
+                    if last_check_ts:
+                        try:
+                            last_check = _dt.fromisoformat(last_check_ts)
+                            if (_dt.utcnow() - last_check).total_seconds() < 300:  # 5 minutes
+                                should_check_downgrade = False
+                        except Exception:
+                            pass
+
                     downgrade = False
-                    try:
-                        payload = {"symbol": symbol, "contract": contract, "social": {"score":hype_val, **hype_meta}, "news": nitems[:6], "market": m.model_dump() if m else {}, "quick_filter": True}
-                        dec2 = await decide(payload)
-                        if (dscore < 0.0 or dec2.direction == "down" or dec2.trade_proposal.action in ("flat","short")) and (z_sum < 0):
-                            downgrade = True
-                    except Exception:
-                        pass
+                    if should_check_downgrade:
+                        hype_val, hype_meta = self.hype.hype_score(symbol)
+                        z_sum = (hype_meta.get("z_m",0)+hype_meta.get("z_a",0)+hype_meta.get("z_e",0))
+                        nitems = self.news_cache.get(symbol, [])
+                        has_confirmed = any((d in it["url"]) for it in nitems for d in ["coindesk.com","cointelegraph.com","decrypt.co"])
+                        nscore = news_score(has_confirmed, len(nitems))
+                        mscore = market_score(m.liq_usd if m else 0.0, m.vol_1h if m else 0.0, m.ret_5m if m else 0.0, m.price_change_1h if m else 0.0, m.spread_bps if m else None, m.txns_h1 if m else None)
+                        dscore = decision_score(hype_val, mscore, nscore)
+                        try:
+                            payload = {"symbol": symbol, "contract": contract, "social": {"score":hype_val, **hype_meta}, "news": nitems[:6], "market": m.model_dump() if m else {}, "quick_filter": True}
+                            dec2 = await decide(payload)
+                            if (dscore < 0.0 or dec2.direction == "down" or dec2.trade_proposal.action in ("flat","short")) and (z_sum < 0):
+                                downgrade = True
+                        except Exception:
+                            pass
                     # Load kill switches
                     kills = set()
                     try:
@@ -325,24 +355,30 @@ class Orchestrator:
                     # TP ladder
                     if not tp1_done and current_ret >= 0.15:
                         sell_qty = qty * 0.30
+                        expected_out_portion = exp_wsol * (sell_qty / qty)  # Correct proportion
                         plan = to_exit_plan(symbol, contract, sell_qty, decimals, out_asset=settings.execution.default_input_token,
                                             slippage_base_pct=settings.execution.slippage_base_pct,
                                             anti_mev=settings.execution.gmgn_anti_mev, priority_fee_sol=settings.execution.sol_priority_fee_sol)
                         res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""), from_address=(settings.solana.address or ""), dry_run=False)
                         realized = sum((x.get("realized_out") or 0) for x in res.get("results", []))
-                        reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=exp_wsol*0.30, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="tp1")
+                        reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=expected_out_portion, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="tp1")
+                        _record_exit_to_cb(invested, realized, sell_qty, qty, contract)  # Record to CB
                         tp1_done = True
+                        qty = qty - sell_qty  # Update local qty for next checks
                         try: await send_alert(f"🎯 TP1 exit 30% {symbol}")
                         except Exception: pass
                     if not tp2_done and current_ret >= 0.35:
-                        sell_qty = qty * 0.30
+                        sell_qty = qty * 0.30  # 30% of REMAINING qty
+                        expected_out_portion = exp_wsol * (sell_qty / (qty if qty > sell_qty else qty + sell_qty))  # Proportion of total
                         plan = to_exit_plan(symbol, contract, sell_qty, decimals, out_asset=settings.execution.default_input_token,
                                             slippage_base_pct=settings.execution.slippage_base_pct,
                                             anti_mev=settings.execution.gmgn_anti_mev, priority_fee_sol=settings.execution.sol_priority_fee_sol)
                         res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""), from_address=(settings.solana.address or ""), dry_run=False)
                         realized = sum((x.get("realized_out") or 0) for x in res.get("results", []))
-                        reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=exp_wsol*0.30, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="tp2")
+                        reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=expected_out_portion, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="tp2")
+                        _record_exit_to_cb(invested, realized, sell_qty, qty if qty > sell_qty else qty + sell_qty, contract)  # Record to CB
                         tp2_done = True
+                        qty = qty - sell_qty  # Update local qty for next checks
                         try: await send_alert(f"🎯 TP2 exit 30% {symbol}")
                         except Exception: pass
                     # Trailing stop (remaining)
@@ -377,10 +413,10 @@ class Orchestrator:
                         except Exception: pass
                         # continue to next pos
                         continue
-                    # Market stress (spread/txns/amm)
-                    if (m and m.spread_bps is not None and m.spread_bps > 1.5*settings.risk.max_spread_bps) or (m and m.txns_h1 is not None and int(pos['entry_txns_h1'] or 0) > 0 and m.txns_h1 < 0.5*int(pos['entry_txns_h1'])) or (recent_min_pi < -8.0):
+                    # Market stress (spread/txns/amm) - Use pre-calculated conditions
+                    if stress_spread or stress_txns or stress_amm:
                         sell_qty = qty
-                        reason = "stress_spread" if (m and m.spread_bps is not None and m.spread_bps > 1.5*settings.risk.max_spread_bps) else ("stress_txns" if (m and m.txns_h1 is not None and int(pos['entry_txns_h1'] or 0) > 0 and m.txns_h1 < 0.5*int(pos['entry_txns_h1'])) else "stress_amm_pi")
+                        reason = "stress_spread" if stress_spread else ("stress_txns" if stress_txns else "stress_amm_pi")
                         plan = to_exit_plan(symbol, contract, sell_qty, decimals, out_asset=settings.execution.default_input_token,
                                             slippage_base_pct=settings.execution.slippage_base_pct,
                                             anti_mev=settings.execution.gmgn_anti_mev, priority_fee_sol=settings.execution.sol_priority_fee_sol)
@@ -390,6 +426,7 @@ class Orchestrator:
                         _record_exit_to_cb(invested, realized, sell_qty, qty, contract)
                         try: await send_alert(f"⚠️ Market-stress exit {symbol} ({reason})")
                         except Exception: pass
+                        continue  # Skip to next position after stress exit
                     # persist marks/state
                     mark_position_check(pos["id"], new_hwm_wsol, high_ret, tp1_done, tp2_done)
             except Exception as e:
