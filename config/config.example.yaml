@@ -1,0 +1,59 @@
+perplexity:
+  enabled: true
+  model_fast: "sonar-small-online"
+  model_final: "sonar-medium-online"
+
+openai:
+  api_key: ""         # опционально (fallback)
+  model_fast: "gpt-5-mini"
+  model_final: "gpt-5"
+
+solana:
+  private_key_b58: "" # ключ кошелька (base58)
+  address: ""         # адрес кошелька
+  rpc_url: ""         # RPC для getTransaction
+
+execution:
+  dry_run: true
+  gmgn_anti_mev: true
+  sol_priority_fee_sol: 0.006
+  default_input_token: "WSOL"      # входной актив для покупок
+  default_trade_size_sol: 0.02
+  default_trade_size_usdc: 20.0
+  slippage_base_pct: 30.0
+  split_threshold_price_impact_pct: 15.0
+  max_splits: 3
+
+features:
+  hype_window_secs: 900
+
+logging:
+  out_dir: "data"
+
+telegram:
+  enabled: false
+  bot_token: ""
+  chat_id: ""
+
+sources:
+  farcaster_enabled: false
+  google_news_enabled: true
+  google_news_lang: "en-US"
+  google_news_geo: "US"
+  google_news_ceid: "US:en"
+  reddit_enabled: true
+  reddit_subs: ["CryptoCurrency","CryptoMarkets","solana","CryptoMoonShots"]
+
+risk:
+  blacklist_mints: []
+  blacklist_symbols: []
+  max_spread_bps: 1000
+  min_liquidity_usd: 5000
+  min_txns_h1: 5
+
+web:
+  host: "0.0.0.0"
+  port: 8000
+  api_token: ""
+  basic_user: "admin"
+  basic_password: "admin"
