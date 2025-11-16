@@ -22,6 +22,8 @@ from .utils.control import get_dry_run, get_size_sol, get_size_usdc, is_source_e
 from .utils.solana import is_valid_mint
 from .utils.db import upsert_position_on_buy, get_open_positions, mark_position_check, reduce_position, get_recent_amm_pi
 from .utils.alerts import send_alert
+from .utils.circuit_breaker import is_circuit_open, record_trade, get_status as get_cb_status
+from .utils.portfolio_risk import can_open_new_position, get_max_position_size, get_portfolio_status
 
 class Orchestrator:
     def __init__(self):
@@ -30,7 +32,8 @@ class Orchestrator:
         self.news_cache: dict[str, list[dict]] = defaultdict(list)
 
     async def run(self):
-        tasks = [self._run_bluesky(), self._run_rss(), self._run_gecko(), self._loop_decisions(), self._run_positions()]
+        tasks = [self._run_bluesky(), self._run_rss(), self._run_gecko(), self._loop_decisions(),
+                 self._run_positions(), self._save_hype_state()]
         if settings.sources.google_news_enabled: tasks.append(self._run_google_news())
         if settings.sources.farcaster_enabled: tasks.append(self._run_farcaster())
         if settings.sources.reddit_enabled: tasks.append(self._run_reddit())
@@ -142,6 +145,13 @@ class Orchestrator:
                 if bl: continue
                 fr, why = fails_risk_gates(mkt.liq_usd, mkt.txns_h1, mkt.spread_bps)
                 if fr: continue
+                # Circuit breaker check
+                if settings.risk.circuit_breaker_enabled:
+                    cb_open, cb_reason = is_circuit_open()
+                    if cb_open:
+                        try: await send_alert(f"⚠️ Circuit breaker: {cb_reason}")
+                        except Exception: pass
+                        continue
                 nitems = self.news_cache.get(sym, [])
                 has_confirmed = any((d in it["url"]) for it in nitems for d in ["coindesk.com","cointelegraph.com","decrypt.co"])
                 nscore = news_score(has_confirmed, len(nitems))
@@ -163,6 +173,27 @@ class Orchestrator:
                             "score": dscore, "action": dec.trade_proposal.action, "contract": plan.out_token,
                             "amount_in": plan.amount_in, "slippage": plan.slippage_pct, "anti_mev": plan.anti_mev})
                 if get_dry_run(): continue
+                # Portfolio risk checks
+                can_open, port_reason = can_open_new_position()
+                if not can_open:
+                    try: await send_alert(f"⚠️ Portfolio limit: {port_reason}")
+                    except Exception: pass
+                    continue
+                # Adjust position size if needed
+                proposed_size_wsol = get_size_sol() if settings.execution.default_input_token.upper() == "WSOL" else (get_size_usdc() / 100.0)
+                adjusted_size, size_warning = get_max_position_size(proposed_size_wsol)
+                if size_warning:
+                    try: await send_alert(f"⚠️ {size_warning}")
+                    except Exception: pass
+                    # Recreate plan with adjusted size
+                    if settings.execution.default_input_token.upper() == "WSOL":
+                        plan = to_execution_plan(dec, in_asset=settings.execution.default_input_token,
+                                                 size_sol=adjusted_size, size_usdc=get_size_usdc(),
+                                                 anti_mev=settings.execution.gmgn_anti_mev, priority_fee_sol=settings.execution.sol_priority_fee_sol)
+                    else:
+                        plan = to_execution_plan(dec, in_asset=settings.execution.default_input_token,
+                                                 size_sol=get_size_sol(), size_usdc=adjusted_size * 100.0,
+                                                 anti_mev=settings.execution.gmgn_anti_mev, priority_fee_sol=settings.execution.sol_priority_fee_sol)
                 try:
                     res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""),
                                             from_address=(settings.solana.address or ""), dry_run=False)
@@ -186,6 +217,16 @@ class Orchestrator:
 
     async def _run_positions(self):
         from .execution.gmgn_sol import WSOL, LAMPORTS, gmgn_get_route_sol
+
+        def _record_exit_to_cb(invested_wsol: float, realized_wsol: float, sell_qty: float, total_qty: float, contract: str):
+            """Helper to record exit result to circuit breaker."""
+            if not settings.risk.circuit_breaker_enabled:
+                return
+            # Calculate P/L for this exit
+            invested_portion = invested_wsol * (sell_qty / max(1e-12, total_qty))
+            profit_loss = realized_wsol - invested_portion
+            record_trade(profit_loss, contract)
+
         while True:
             try:
                 open_pos = get_open_positions()
@@ -261,6 +302,7 @@ class Orchestrator:
                         res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""), from_address=(settings.solana.address or ""), dry_run=False)
                         realized = sum((x.get("realized_out") or 0) for x in res.get("results", []))
                         reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=exp_wsol, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="kill_switch")
+                        _record_exit_to_cb(invested, realized, sell_qty, qty, contract)
                         try: await send_alert(f"⛔ Kill-switch exit {symbol}")
                         except Exception: pass
                         continue
@@ -276,6 +318,7 @@ class Orchestrator:
                             res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""), from_address=(settings.solana.address or ""), dry_run=False)
                             realized = sum((x.get("realized_out") or 0) for x in res.get("results", []))
                             reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=exp_wsol, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="time_stop")
+                            _record_exit_to_cb(invested, realized, sell_qty, qty, contract)
                             try: await send_alert(f"⏰ Time-stop exit {symbol}")
                             except Exception: pass
                             continue
@@ -311,6 +354,7 @@ class Orchestrator:
                         res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""), from_address=(settings.solana.address or ""), dry_run=False)
                         realized = sum((x.get("realized_out") or 0) for x in res.get("results", []))
                         reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=exp_wsol, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="trailing_stop")
+                        _record_exit_to_cb(invested, realized, sell_qty, qty, contract)
                         try: await send_alert(f"🪓 Trailing stop exit {symbol}")
                         except Exception: pass
                         continue
@@ -328,6 +372,7 @@ class Orchestrator:
                         res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""), from_address=(settings.solana.address or ""), dry_run=False)
                         realized = sum((x.get("realized_out") or 0) for x in res.get("results", []))
                         reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=exp_wsol*(sell_qty/qty), realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason=reason)
+                        _record_exit_to_cb(invested, realized, sell_qty, qty, contract)
                         try: await send_alert(f"📉 Downgrade exit {symbol} ({reason})")
                         except Exception: pass
                         # continue to next pos
@@ -342,6 +387,7 @@ class Orchestrator:
                         res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""), from_address=(settings.solana.address or ""), dry_run=False)
                         realized = sum((x.get("realized_out") or 0) for x in res.get("results", []))
                         reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=exp_wsol, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason=reason)
+                        _record_exit_to_cb(invested, realized, sell_qty, qty, contract)
                         try: await send_alert(f"⚠️ Market-stress exit {symbol} ({reason})")
                         except Exception: pass
                     # persist marks/state
@@ -350,3 +396,12 @@ class Orchestrator:
                 try: await send_alert(f"❌ positions: {e}")
                 except Exception: pass
             await asyncio.sleep(15)
+
+    async def _save_hype_state(self):
+        """Периодически сохраняет состояние hype aggregator."""
+        while True:
+            try:
+                await asyncio.sleep(300)  # Сохраняем каждые 5 минут
+                self.hype.save_state()
+            except Exception:
+                pass

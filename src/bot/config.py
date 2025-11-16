@@ -55,6 +55,17 @@ class RiskConf(BaseModel):
     max_spread_bps: float = 1000.0
     min_liquidity_usd: float = 5000.0
     min_txns_h1: int = 5
+    # Circuit breaker settings
+    circuit_breaker_enabled: bool = True
+    circuit_breaker_window: int = 20  # количество последних сделок для анализа
+    circuit_breaker_min_trades: int = 5  # минимум сделок для активации
+    circuit_breaker_loss_threshold_pct: float = 0.7  # 70% убыточных сделок
+    circuit_breaker_max_drawdown_wsol: float = 0.5  # максимальный drawdown в WSOL
+    circuit_breaker_cooldown_hours: int = 4  # часы до автоматического сброса
+    # Portfolio risk management
+    max_open_positions: int = 5  # максимум открытых позиций одновременно
+    max_portfolio_risk_wsol: float = 2.0  # максимальный суммарный риск портфеля
+    max_position_size_pct: float = 0.3  # максимум 30% портфеля на одну позицию
 
 class WebConf(BaseModel):
     host: str = "0.0.0.0"

@@ -50,6 +50,17 @@ risk:
   max_spread_bps: 1000
   min_liquidity_usd: 5000
   min_txns_h1: 5
+  # Circuit breaker (защита от череды убытков)
+  circuit_breaker_enabled: true
+  circuit_breaker_window: 20           # анализировать последние N сделок
+  circuit_breaker_min_trades: 5        # минимум сделок для активации
+  circuit_breaker_loss_threshold_pct: 0.7  # 70% убыточных = стоп
+  circuit_breaker_max_drawdown_wsol: 0.5   # макс drawdown 0.5 WSOL
+  circuit_breaker_cooldown_hours: 4    # часы до авто-возобновления
+  # Portfolio risk management
+  max_open_positions: 5                # макс одновременных позиций
+  max_portfolio_risk_wsol: 2.0         # макс суммарный риск портфеля
+  max_position_size_pct: 0.3           # макс 30% на одну позицию
 
 web:
   host: "0.0.0.0"
