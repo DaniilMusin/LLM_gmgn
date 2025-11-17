@@ -49,6 +49,11 @@ def record_trade(profit_loss_wsol: float, contract: str):
     with _LOCK:
         state = _load_state()
 
+        # BUG FIX #9: Don't record trades during manual override to avoid unexpected CB opening
+        if state.get("manual_override", False):
+            # Manual override active - skip recording
+            return
+
         now = datetime.now(timezone.utc).isoformat()
         trade = {
             "timestamp": now,
@@ -71,7 +76,7 @@ def record_trade(profit_loss_wsol: float, contract: str):
             state["total_wins"] += 1
 
         # Проверяем условия для открытия circuit breaker
-        if not state["is_open"] and not state.get("manual_override", False):
+        if not state["is_open"]:
             recent = state["recent_trades"]
             if len(recent) >= getattr(settings.risk, 'circuit_breaker_min_trades', 5):
                 # Считаем процент убыточных

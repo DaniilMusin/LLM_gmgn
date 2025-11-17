@@ -369,14 +369,15 @@ class Orchestrator:
                         except Exception: pass
                     if not tp2_done and current_ret >= 0.35:
                         sell_qty = qty * 0.30  # 30% of REMAINING qty
-                        expected_out_portion = exp_wsol * (sell_qty / (qty if qty > sell_qty else qty + sell_qty))  # Proportion of total
+                        # BUG FIX #10: Use correct proportion calculation (same as TP1)
+                        expected_out_portion = exp_wsol * (sell_qty / qty)
                         plan = to_exit_plan(symbol, contract, sell_qty, decimals, out_asset=settings.execution.default_input_token,
                                             slippage_base_pct=settings.execution.slippage_base_pct,
                                             anti_mev=settings.execution.gmgn_anti_mev, priority_fee_sol=settings.execution.sol_priority_fee_sol)
                         res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""), from_address=(settings.solana.address or ""), dry_run=False)
                         realized = sum((x.get("realized_out") or 0) for x in res.get("results", []))
                         reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=expected_out_portion, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="tp2")
-                        _record_exit_to_cb(invested, realized, sell_qty, qty if qty > sell_qty else qty + sell_qty, contract)  # Record to CB
+                        _record_exit_to_cb(invested, realized, sell_qty, qty, contract)  # Record to CB with correct qty
                         tp2_done = True
                         qty = qty - sell_qty  # Update local qty for next checks
                         try: await send_alert(f"🎯 TP2 exit 30% {symbol}")

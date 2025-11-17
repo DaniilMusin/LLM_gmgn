@@ -34,7 +34,7 @@ async def execute_sol(plan: ExecutionPlan, *, payer_b58: str, from_address: str,
     if pi > settings.execution.split_threshold_price_impact_pct and settings.execution.max_splits > 1:
         k = min(settings.execution.max_splits, max(2, math.ceil(pi / settings.execution.split_threshold_price_impact_pct)))
         part = int(int(plan.amount_in) / k); splits = [part]*(k-1) + [int(plan.amount_in) - part*(k-1)]
-    results = []; total_in_wsol = 0.0
+    results = []; total_in_wsol = 0.0; failed_splits = []  # BUG FIX #8: Track failed splits
     for idx, amt in enumerate(splits, start=1):
         r = await gmgn_get_route_sol(plan.in_token, plan.out_token, int(amt), from_address,
                                      plan.slippage_pct or settings.execution.slippage_base_pct,
@@ -55,28 +55,48 @@ async def execute_sol(plan: ExecutionPlan, *, payer_b58: str, from_address: str,
             results.append({"dry_run": True, "split": idx, "quote_id": quote_id, "quote": q, "last_valid_height": last_h, "expected_out": exp_out})
             continue
         # sign & send
-        signed_b64 = sol_sign_tx_base64(unsigned, payer_b58)
-        sent = await gmgn_send_tx_sol(signed_b64, anti_mev=plan.anti_mev)
-        txsig = sent.get("data",{}).get("hash")
-        status = await gmgn_poll_status(txsig, last_h)
-        realized = None; dec = 0
         try:
-            txres = await _fetch_solana_tx(txsig)
-            if txres and txres.get("meta"):
-                # realized_out measured on out_token (buy: acquired token; sell: WSOL received)
-                a0,a1,dec = _extract_owner_balances(txres["meta"], from_address, plan.out_token)
-                realized = max(0.0, a1 - a0)
-                amm_pi, _det = estimate_pool_price_impact(txres["meta"], trader_owner=from_address)
-            else:
+            signed_b64 = sol_sign_tx_base64(unsigned, payer_b58)
+            sent = await gmgn_send_tx_sol(signed_b64, anti_mev=plan.anti_mev)
+            txsig = sent.get("data",{}).get("hash")
+            status = await gmgn_poll_status(txsig, last_h)
+            realized = None; dec = 0
+            try:
+                txres = await _fetch_solana_tx(txsig)
+                if txres and txres.get("meta"):
+                    # realized_out measured on out_token (buy: acquired token; sell: WSOL received)
+                    a0,a1,dec = _extract_owner_balances(txres["meta"], from_address, plan.out_token)
+                    # BUG FIX #12: Don't mask negative realized_out, but log warning
+                    realized = a1 - a0
+                    if realized < 0:
+                        try:
+                            await send_alert(f"⚠️ Negative realized_out: {realized} for tx {txsig}")
+                        except Exception: pass
+                        realized = 0.0  # Still cap at zero for downstream logic
+                    amm_pi, _det = estimate_pool_price_impact(txres["meta"], trader_owner=from_address)
+                else:
+                    amm_pi = None
+            except Exception:
                 amm_pi = None
-        except Exception:
-            amm_pi = None
-        slip_pct = None
-        if exp_out is not None and realized is not None:
-            try: slip_pct = (exp_out - realized) / max(1e-9, exp_out) * 100.0
-            except Exception: pass
-        save_trade(quote_id=quote_id, tx=txsig, split=idx, status=status.get("data"), realized_out=realized, slippage_pct=slip_pct, amm_pi_pct=amm_pi, side=plan.side, contract=(plan.out_token if plan.side=='buy' else plan.in_token))
-        results.append({"tx": txsig, "status": status.get("data"), "split": idx, "expected_out": exp_out, "realized_out": realized, "slippage_pct": slip_pct, "amm_pi_pct": amm_pi, "decimals": dec})
-        if plan.in_token.endswith("11112"):  # WSOL
-            total_in_wsol += (amt / 1e9)
-    return {"results": results, "splits": len(splits), "pi0": pi, "total_in_wsol": total_in_wsol}
+            slip_pct = None
+            if exp_out is not None and realized is not None:
+                try: slip_pct = (exp_out - realized) / max(1e-9, exp_out) * 100.0
+                except Exception: pass
+            save_trade(quote_id=quote_id, tx=txsig, split=idx, status=status.get("data"), realized_out=realized, slippage_pct=slip_pct, amm_pi_pct=amm_pi, side=plan.side, contract=(plan.out_token if plan.side=='buy' else plan.in_token))
+            results.append({"tx": txsig, "status": status.get("data"), "split": idx, "expected_out": exp_out, "realized_out": realized, "slippage_pct": slip_pct, "amm_pi_pct": amm_pi, "decimals": dec})
+            # BUG FIX #7: Use WSOL constant instead of hardcoded substring check
+            from .gmgn_sol import WSOL, LAMPORTS
+            if plan.in_token == WSOL:
+                total_in_wsol += (amt / LAMPORTS)
+        except Exception as e:
+            # BUG FIX #8: Track split failures
+            failed_splits.append((idx, str(e)))
+            results.append({"error": str(e), "split": idx, "expected_out": exp_out})
+
+    # BUG FIX #8: Alert if some splits failed
+    if failed_splits and len(failed_splits) < len(splits):
+        try:
+            await send_alert(f"⚠️ Partial split failure: {len(failed_splits)}/{len(splits)} splits failed for {plan.symbol or plan.out_token}")
+        except Exception: pass
+
+    return {"results": results, "splits": len(splits), "pi0": pi, "total_in_wsol": total_in_wsol, "failed_splits": len(failed_splits)}

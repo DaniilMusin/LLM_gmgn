@@ -2,39 +2,46 @@
 Portfolio Risk Management - управление лимитами на позиции и суммарный риск.
 """
 from __future__ import annotations
+import threading
 from typing import Optional
 from ..config import settings
 from .db import get_open_positions
+
+# Thread-safe lock to prevent race conditions when checking/modifying portfolio limits
+_PORTFOLIO_LOCK = threading.Lock()
 
 
 def can_open_new_position() -> tuple[bool, Optional[str]]:
     """
     Проверяет, можно ли открыть новую позицию с учетом портфельных лимитов.
+    Thread-safe: использует lock для предотвращения race conditions.
 
     Returns:
         (can_open, reason): True если можно открывать, иначе False с причиной
     """
-    open_positions = get_open_positions()
-    current_count = len(open_positions)
+    with _PORTFOLIO_LOCK:
+        open_positions = get_open_positions()
+        current_count = len(open_positions)
 
-    # Проверка лимита на количество позиций
-    max_positions = settings.risk.max_open_positions
-    if current_count >= max_positions:
-        return False, f"Reached max open positions limit: {current_count}/{max_positions}"
+        # Проверка лимита на количество позиций
+        max_positions = settings.risk.max_open_positions
+        if current_count >= max_positions:
+            return False, f"Reached max open positions limit: {current_count}/{max_positions}"
 
-    # Проверка суммарного риска портфеля
-    total_risk_wsol = sum(float(pos["invested_wsol"] or 0.0) for pos in open_positions)
-    max_risk = settings.risk.max_portfolio_risk_wsol
+        # Проверка суммарного риска портфеля
+        total_risk_wsol = sum(float(pos["invested_wsol"] or 0.0) for pos in open_positions)
+        max_risk = settings.risk.max_portfolio_risk_wsol
 
-    if total_risk_wsol >= max_risk:
-        return False, f"Portfolio risk limit reached: {total_risk_wsol:.4f}/{max_risk} WSOL"
+        if total_risk_wsol >= max_risk:
+            return False, f"Portfolio risk limit reached: {total_risk_wsol:.4f}/{max_risk} WSOL"
 
-    return True, None
+        return True, None
 
 
 def get_max_position_size(proposed_size_wsol: float) -> tuple[float, Optional[str]]:
     """
     Вычисляет максимальный допустимый размер позиции с учетом портфельных лимитов.
+    Thread-safe: использует lock для предотвращения race conditions.
 
     Args:
         proposed_size_wsol: Предлагаемый размер позиции в WSOL
@@ -42,25 +49,26 @@ def get_max_position_size(proposed_size_wsol: float) -> tuple[float, Optional[st
     Returns:
         (allowed_size, warning): Разрешенный размер и возможное предупреждение
     """
-    open_positions = get_open_positions()
-    total_risk_wsol = sum(float(pos["invested_wsol"] or 0.0) for pos in open_positions)
+    with _PORTFOLIO_LOCK:
+        open_positions = get_open_positions()
+        total_risk_wsol = sum(float(pos["invested_wsol"] or 0.0) for pos in open_positions)
 
-    # Проверяем общий портфельный лимит
-    max_portfolio_risk = settings.risk.max_portfolio_risk_wsol
-    available_risk = max(0.0, max_portfolio_risk - total_risk_wsol)
+        # Проверяем общий портфельный лимит
+        max_portfolio_risk = settings.risk.max_portfolio_risk_wsol
+        available_risk = max(0.0, max_portfolio_risk - total_risk_wsol)
 
-    # Проверяем лимит на размер одной позиции (процент от портфеля)
-    max_position_pct = settings.risk.max_position_size_pct
-    max_single_position = max_portfolio_risk * max_position_pct
+        # Проверяем лимит на размер одной позиции (процент от портфеля)
+        max_position_pct = settings.risk.max_position_size_pct
+        max_single_position = max_portfolio_risk * max_position_pct
 
-    # Берем минимум из доступного риска и максимального размера позиции
-    max_allowed = min(available_risk, max_single_position)
+        # Берем минимум из доступного риска и максимального размера позиции
+        max_allowed = min(available_risk, max_single_position)
 
-    if proposed_size_wsol > max_allowed:
-        warning = f"Position size reduced from {proposed_size_wsol:.4f} to {max_allowed:.4f} WSOL"
-        return max_allowed, warning
+        if proposed_size_wsol > max_allowed:
+            warning = f"Position size reduced from {proposed_size_wsol:.4f} to {max_allowed:.4f} WSOL"
+            return max_allowed, warning
 
-    return proposed_size_wsol, None
+        return proposed_size_wsol, None
 
 
 def get_portfolio_status() -> dict:
