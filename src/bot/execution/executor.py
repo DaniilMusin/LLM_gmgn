@@ -32,9 +32,18 @@ async def execute_sol(plan: ExecutionPlan, *, payer_b58: str, from_address: str,
     q0 = route0.get("data",{}).get("quote",{}) or {}
     pi = float(q0.get("priceImpact", 0) or q0.get("price_impact", 0) or 0)
     splits = [int(plan.amount_in)]
+    # BUG FIX #45: Validate splits to prevent invalid or negative values
     if pi > settings.execution.split_threshold_price_impact_pct and settings.execution.max_splits > 1:
         k = min(settings.execution.max_splits, max(2, math.ceil(pi / settings.execution.split_threshold_price_impact_pct)))
-        part = int(int(plan.amount_in) / k); splits = [part]*(k-1) + [int(plan.amount_in) - part*(k-1)]
+        part = int(int(plan.amount_in) / k)
+        # Ensure part is positive and last split is positive
+        if part > 0:
+            last_split = int(plan.amount_in) - part*(k-1)
+            if last_split > 0:
+                splits = [part]*(k-1) + [last_split]
+            else:
+                # Fallback: use single trade if splits don't work
+                splits = [int(plan.amount_in)]
     results = []; total_in_wsol = 0.0; failed_splits = []  # BUG FIX #8: Track failed splits
     for idx, amt in enumerate(splits, start=1):
         r = await gmgn_get_route_sol(plan.in_token, plan.out_token, int(amt), from_address,

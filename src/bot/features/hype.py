@@ -69,10 +69,16 @@ class HypeAggregator:
                     # BUG FIX #6: Use datetime.now(timezone.utc) instead of deprecated utcnow()
                     "saved_at": datetime.now(timezone.utc).isoformat()
                 }
-                with open(self._state_path, "wb") as f:
+                # BUG FIX #49: Use atomic write to prevent file corruption
+                temp_path = self._state_path + ".tmp"
+                with open(temp_path, "wb") as f:
                     pickle.dump(state, f)
+                # Atomic rename on POSIX systems
+                os.replace(temp_path, self._state_path)
             except Exception as e:
-                # Не падаем если не удалось сохранить
+                # BUG FIX #49: Log save errors for debugging
+                from ..utils.logging import logger
+                logger.error(f"Failed to save hype state: {e}")
                 pass
 
     def load_state(self):
@@ -122,5 +128,7 @@ class HypeAggregator:
                         self.stats_eng[sym] = rs
 
             except Exception as e:
-                # Не падаем если не удалось загрузить
+                # BUG FIX #49: Log load errors for debugging
+                from ..utils.logging import logger
+                logger.warning(f"Failed to load hype state: {e}. Starting with clean state.")
                 pass

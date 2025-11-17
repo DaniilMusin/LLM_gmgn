@@ -22,6 +22,9 @@ async def poll_reddit_subs(subs: List[str], interval=60) -> AsyncIterator[Social
                     syms=[m[1:] for m in re.findall(r"\$[A-Z0-9]{2,10}", title.upper())]
                     if not syms: continue
                     yield SocialPost(platform="reddit", post_id=key, created_at=dt, text=title, url=row["link"], symbols=syms, lang=None, engagement={})
-            except Exception:
+            except Exception as e:
+                # BUG FIX #51: Log reddit errors for debugging
+                from ..utils.logging import logger
+                logger.error(f"Reddit polling error for r/{sub}: {e}")
                 continue
         await asyncio.sleep(interval)

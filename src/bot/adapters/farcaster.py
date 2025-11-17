@@ -22,6 +22,8 @@ async def poll_farcaster(interval=20) -> AsyncIterator[SocialPost]:
                     dt = datetime.fromtimestamp(int(c.get("timestamp", 0))/1000, tz=timezone.utc)
                     author = (c.get("author") or {}).get("username") or None
                     yield SocialPost(platform="farcaster", post_id=key, author_handle=author, created_at=dt, text=text, url=c.get("url"), symbols=syms, lang=None, engagement={})
-        except Exception:
-            pass
+        except Exception as e:
+            # BUG FIX #51: Log farcaster errors for debugging
+            from ..utils.logging import logger
+            logger.error(f"Farcaster polling error: {e}")
         await asyncio.sleep(interval)

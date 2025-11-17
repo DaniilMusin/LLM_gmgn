@@ -24,7 +24,10 @@ async def poll_rss(interval=60) -> AsyncIterator[NewsItem]:
                     title = row["title"] or ""
                     syms = [m[1:] for m in re.findall(r"\$[A-Z0-9]{2,10}", title.upper())]
                     yield NewsItem(source=url.split("/")[2], title=title, url=row["link"], published_at=dt, symbols=syms)
-            except Exception:
+            except Exception as e:
+                # BUG FIX #52: Log RSS feed errors for debugging
+                from ..utils.logging import logger
+                logger.error(f"RSS feed polling error for {url}: {e}")
                 continue
         await asyncio.sleep(interval)
 def google_news_rss(query: str, hl="en-US", gl="US", ceid="US:en") -> str:
@@ -42,6 +45,9 @@ async def poll_google_news(queries: list[str], hl="en-US", gl="US", ceid="US:en"
                     ts = time.mktime(row["published"]) if row["published"] else time.time()
                     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                     yield NewsItem(source="news.google.com", title=row["title"], url=row["link"], published_at=dt, symbols=[])
-            except Exception:
+            except Exception as e:
+                # BUG FIX #52: Log Google News errors for debugging
+                from ..utils.logging import logger
+                logger.error(f"Google News polling error for query '{q}': {e}")
                 continue
         await asyncio.sleep(interval)
