@@ -289,13 +289,14 @@ class Orchestrator:
                     stress_amm = recent_min_pi < -8.0
 
                     # Hype downgrade - OPTIMIZED: Only check every 5 minutes to reduce LLM costs
-                    from datetime import datetime as _dt
+                    from datetime import datetime as _dt, timezone as _tz
                     last_check_ts = pos.get("last_check_ts")
                     should_check_downgrade = True
                     if last_check_ts:
                         try:
                             last_check = _dt.fromisoformat(last_check_ts)
-                            if (_dt.utcnow() - last_check).total_seconds() < 300:  # 5 minutes
+                            # BUG FIX #22: Replace deprecated utcnow() with now(timezone.utc)
+                            if (_dt.now(_tz.utc) - last_check).total_seconds() < 300:  # 5 minutes
                                 should_check_downgrade = False
                         except Exception:
                             pass
@@ -338,9 +339,10 @@ class Orchestrator:
                         continue
                     # Time stop
                     if max_hold_sec and opened_at:
-                        from datetime import datetime as _dt
+                        from datetime import datetime as _dt, timezone as _tz
                         t0 = _dt.fromisoformat(opened_at)
-                        if (_dt.utcnow() - t0).total_seconds() >= max_hold_sec:
+                        # BUG FIX #22: Replace deprecated utcnow() with now(timezone.utc)
+                        if (_dt.now(_tz.utc) - t0).total_seconds() >= max_hold_sec:
                             sell_qty = qty
                             plan = to_exit_plan(symbol, contract, sell_qty, decimals, out_asset=settings.execution.default_input_token,
                                                 slippage_base_pct=settings.execution.slippage_base_pct,
