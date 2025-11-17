@@ -16,11 +16,11 @@ from .signals.scorer import decision_score
 from .signals.strategy import to_trade_signal
 from .execution.plan import to_execution_plan, to_exit_plan
 from .execution.executor import execute_sol
-from .utils.logging import log_signal
+from .utils.logging import log_signal, logger
 from .utils.filters import is_blocklisted, fails_risk_gates
 from .utils.control import get_dry_run, get_size_sol, get_size_usdc, is_source_enabled
 from .utils.solana import is_valid_mint
-from .utils.db import upsert_position_on_buy, get_open_positions, mark_position_check, reduce_position, get_recent_amm_pi
+from .utils.db import upsert_position_on_buy, get_open_positions, mark_position_check, reduce_position, get_recent_amm_pi, update_position_meta
 from .utils.alerts import send_alert
 from .utils.circuit_breaker import is_circuit_open, record_trade, get_status as get_cb_status
 from .utils.portfolio_risk import can_open_new_position, get_max_position_size, get_portfolio_status
@@ -278,7 +278,6 @@ class Orchestrator:
 
                         # Emergency exit after 5 consecutive failures
                         if quote_failures >= 5:
-                            from ..utils.db import update_position_meta
                             update_position_meta(pos["id"], meta)
                             try:
                                 # Force close position with market order (no quote check)
@@ -299,14 +298,12 @@ class Orchestrator:
                             continue
 
                         # Not yet at emergency threshold, save and skip
-                        from ..utils.db import update_position_meta
                         update_position_meta(pos["id"], meta)
                         continue
                     else:
                         # Quote succeeded, reset failure counter
                         if meta.get("quote_failures", 0) > 0:
                             meta["quote_failures"] = 0
-                            from ..utils.db import update_position_meta
                             update_position_meta(pos["id"], meta)
 
                     current_ret = (exp_wsol - invested) / max(1e-9, invested) if invested>0 else 0.0
@@ -406,18 +403,20 @@ class Orchestrator:
                         res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""), from_address=(settings.solana.address or ""), dry_run=False)
                         realized = sum((x.get("realized_out") or 0) for x in res.get("results", []))
                         reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=expected_out_portion, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="tp1")
-                        _record_exit_to_cb(invested, realized, sell_qty, qty, contract)  # Record to CB
                         tp1_done = True
                         # BUG FIX #16: Update local variables after partial exit
+                        # CRITICAL: Calculate invested_portion BEFORE updating qty
+                        qty_before_exit = qty
+                        invested_portion = invested * (sell_qty / qty_before_exit)  # Invested for sold portion
                         qty = qty - sell_qty
                         exp_wsol = exp_wsol - expected_out_portion  # Update exp_wsol for remaining qty
-                        invested_portion = invested * (sell_qty / (qty + sell_qty))  # Invested for sold portion
                         invested = invested - invested_portion  # Update invested for remaining
                         # BUG FIX #31: Prevent negative values from rounding errors
                         qty = max(0.0, qty)
                         exp_wsol = max(0.0, exp_wsol)
                         invested = max(0.0, invested)
                         current_ret = (exp_wsol - invested) / max(1e-9, invested) if invested > 0 else 0.0  # Recalculate
+                        _record_exit_to_cb(invested, realized, sell_qty, qty_before_exit, contract)  # Record to CB with qty BEFORE exit
                         # BUG FIX #23: Persist tp1_done flag immediately to prevent duplicate TP1 execution
                         mark_position_check(pos["id"], None, None, tp1_done, None)
                         try: await send_alert(f"🎯 TP1 exit 30% {symbol}")
@@ -432,18 +431,20 @@ class Orchestrator:
                         res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""), from_address=(settings.solana.address or ""), dry_run=False)
                         realized = sum((x.get("realized_out") or 0) for x in res.get("results", []))
                         reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=expected_out_portion, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="tp2")
-                        _record_exit_to_cb(invested, realized, sell_qty, qty, contract)  # Record to CB with correct qty
                         tp2_done = True
                         # BUG FIX #16: Update local variables after partial exit
+                        # CRITICAL: Calculate invested_portion BEFORE updating qty
+                        qty_before_exit = qty
+                        invested_portion = invested * (sell_qty / qty_before_exit)  # Invested for sold portion
                         qty = qty - sell_qty
                         exp_wsol = exp_wsol - expected_out_portion  # Update exp_wsol for remaining qty
-                        invested_portion = invested * (sell_qty / (qty + sell_qty))  # Invested for sold portion
                         invested = invested - invested_portion  # Update invested for remaining
                         # BUG FIX #31: Prevent negative values from rounding errors
                         qty = max(0.0, qty)
                         exp_wsol = max(0.0, exp_wsol)
                         invested = max(0.0, invested)
                         current_ret = (exp_wsol - invested) / max(1e-9, invested) if invested > 0 else 0.0  # Recalculate
+                        _record_exit_to_cb(invested, realized, sell_qty, qty_before_exit, contract)  # Record to CB with qty BEFORE exit
                         # BUG FIX #23: Persist tp2_done flag immediately to prevent duplicate TP2 execution
                         mark_position_check(pos["id"], None, None, None, tp2_done)
                         try: await send_alert(f"🎯 TP2 exit 30% {symbol}")
@@ -529,7 +530,6 @@ class Orchestrator:
                     logger.info(f"Cleaned market_cache, kept 100 most recent entries")
 
                 # Очищаем news_cache для символов без открытых позиций
-                from ..utils.db import get_open_positions
                 open_symbols = {pos["symbol"] for pos in get_open_positions()}
                 symbols_to_remove = [sym for sym in self.news_cache.keys() if sym not in open_symbols and len(self.news_cache[sym]) > 50]
                 for sym in symbols_to_remove:

@@ -4,6 +4,7 @@ from ..config import settings
 from ..utils.alerts import send_alert
 from ..utils.db import save_quote, save_trade
 from ..utils.amm_decode import estimate_pool_price_impact
+from ..utils.logging import logger
 import httpx, math
 async def _fetch_solana_tx(sig: str) -> dict | None:
     url = settings.solana.rpc_url
