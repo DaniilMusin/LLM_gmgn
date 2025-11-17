@@ -89,6 +89,14 @@ CREATE TABLE IF NOT EXISTS exits (
 );
 """
 )
+        # BUG FIX #42: Add indexes for frequently queried fields
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_state ON positions(state)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_contract ON positions(contract)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_contract_state ON positions(contract, state)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_contract_ts ON trades(contract, ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_quote_id ON trades(quote_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_exits_position_id ON exits(position_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_quotes_contract ON quotes(contract)")
         conn.commit(); conn.close()
 
 def save_quote(symbol: str, contract: str, in_token: str, out_token: str, in_amount: str,
@@ -131,12 +139,17 @@ def upsert_position_on_buy(symbol: str, contract: str, qty_added: float, cost_ws
             row = conn.execute("SELECT * FROM positions WHERE contract=? AND state='open'", (contract,)).fetchone()
             ts = datetime.now(timezone.utc).isoformat()
             meta = {"kill_switch": kill_switch or []}
+            # BUG FIX #27: Use Solana standard 9 decimals if not provided, validate range
+            if decimals is None:
+                decimals = 9  # Solana standard
+            elif not (0 <= decimals <= 18):
+                raise ValueError(f"Invalid decimals {decimals}, must be 0-18")
             if row is None:
                 avg = cost_wsol_added / max(1e-12, qty_added)
                 cur = conn.execute("""
 INSERT INTO positions(symbol,contract,side,qty,invested_wsol,avg_entry_wsol,opened_at,max_hold_sec,hwm_wsol,hwm_return,tp1_done,tp2_done,decimals,entry_txns_h1,owner_address,meta_json,state,last_check_ts)
 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-""", (symbol,contract,'long',qty_added,cost_wsol_added,avg,ts,max_hold_sec,0.0,0.0,0,0,decimals or 0,entry_txns_h1 or 0,owner_address or '',json.dumps(meta),'open',ts))
+""", (symbol,contract,'long',qty_added,cost_wsol_added,avg,ts,max_hold_sec,0.0,0.0,0,0,decimals,entry_txns_h1 or 0,owner_address or '',json.dumps(meta),'open',ts))
                 conn.commit(); pid = cur.lastrowid
             else:
                 pid = row['id']; qty = float(row['qty'] or 0) + float(qty_added or 0); inv = float(row['invested_wsol'] or 0) + float(cost_wsol_added or 0)
@@ -182,6 +195,13 @@ def mark_position_check(pid: int, hwm_wsol: float | None, hwm_return: float | No
         if tp2_done is not None: sets.append("tp2_done=?"); vals.append(1 if tp2_done else 0)
         sets.append("last_check_ts=?"); vals.append(ts); vals.append(pid)
         conn.execute("UPDATE positions SET "+",".join(sets)+" WHERE id=?", vals)
+        conn.commit(); conn.close()
+
+def update_position_meta(pid: int, meta: dict):
+    """Update position metadata JSON. BUG FIX #28: Track quote failures"""
+    with _LOCK:
+        init_db(); conn=_conn()
+        conn.execute("UPDATE positions SET meta_json=? WHERE id=?", (json.dumps(meta), pid))
         conn.commit(); conn.close()
 
 def get_open_positions() -> List[sqlite3.Row]:

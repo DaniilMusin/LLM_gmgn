@@ -16,11 +16,11 @@ from .signals.scorer import decision_score
 from .signals.strategy import to_trade_signal
 from .execution.plan import to_execution_plan, to_exit_plan
 from .execution.executor import execute_sol
-from .utils.logging import log_signal
+from .utils.logging import log_signal, logger
 from .utils.filters import is_blocklisted, fails_risk_gates
 from .utils.control import get_dry_run, get_size_sol, get_size_usdc, is_source_enabled
 from .utils.solana import is_valid_mint
-from .utils.db import upsert_position_on_buy, get_open_positions, mark_position_check, reduce_position, get_recent_amm_pi
+from .utils.db import upsert_position_on_buy, get_open_positions, mark_position_check, reduce_position, get_recent_amm_pi, update_position_meta
 from .utils.alerts import send_alert
 from .utils.circuit_breaker import is_circuit_open, record_trade, get_status as get_cb_status
 from .utils.portfolio_risk import can_open_new_position, get_max_position_size, get_portfolio_status
@@ -33,7 +33,7 @@ class Orchestrator:
 
     async def run(self):
         tasks = [self._run_bluesky(), self._run_rss(), self._run_gecko(), self._loop_decisions(),
-                 self._run_positions(), self._save_hype_state()]
+                 self._run_positions(), self._save_hype_state(), self._cleanup_caches()]  # BUG FIX #36
         if settings.sources.google_news_enabled: tasks.append(self._run_google_news())
         if settings.sources.farcaster_enabled: tasks.append(self._run_farcaster())
         if settings.sources.reddit_enabled: tasks.append(self._run_reddit())
@@ -183,9 +183,8 @@ class Orchestrator:
                     continue
                 # Adjust position size if needed
                 # NOTE: For USDC input, we need approximate WSOL equivalent for risk checks
-                # Assuming ~150 USDC/SOL average rate: 1 WSOL ≈ 150 USDC
-                USDC_PER_WSOL = 150.0
-                proposed_size_wsol = get_size_sol() if settings.execution.default_input_token.upper() == "WSOL" else (get_size_usdc() / USDC_PER_WSOL)
+                # BUG FIX #32: Use configurable rate instead of hardcoded value
+                proposed_size_wsol = get_size_sol() if settings.execution.default_input_token.upper() == "WSOL" else (get_size_usdc() / settings.execution.wsol_usdc_rate)
                 adjusted_size, size_warning = get_max_position_size(proposed_size_wsol)
                 if size_warning:
                     try: await send_alert(f"⚠️ {size_warning}")
@@ -197,7 +196,7 @@ class Orchestrator:
                                                  anti_mev=settings.execution.gmgn_anti_mev, priority_fee_sol=settings.execution.sol_priority_fee_sol)
                     else:
                         plan = to_execution_plan(dec, in_asset=settings.execution.default_input_token,
-                                                 size_sol=get_size_sol(), size_usdc=adjusted_size * USDC_PER_WSOL,
+                                                 size_sol=get_size_sol(), size_usdc=adjusted_size * settings.execution.wsol_usdc_rate,
                                                  anti_mev=settings.execution.gmgn_anti_mev, priority_fee_sol=settings.execution.sol_priority_fee_sol)
                 try:
                     res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""),
@@ -266,9 +265,46 @@ class Orchestrator:
                         try: await send_alert(f"⚠️ Quote error for {symbol}: {e}")
                         except Exception: pass
 
-                    # Skip this position if quote failed - cannot make exit decisions
+                    # BUG FIX #28: Track quote failures and emergency exit after 5 consecutive failures
+                    meta = {}
+                    try:
+                        meta = json.loads(pos["meta_json"] or "{}")
+                    except Exception:
+                        meta = {}
+
                     if quote_failed:
+                        quote_failures = meta.get("quote_failures", 0) + 1
+                        meta["quote_failures"] = quote_failures
+
+                        # Emergency exit after 5 consecutive failures
+                        if quote_failures >= 5:
+                            update_position_meta(pos["id"], meta)
+                            try:
+                                # Force close position with market order (no quote check)
+                                sell_qty = qty
+                                plan = to_exit_plan(symbol, contract, sell_qty, decimals, out_asset=settings.execution.default_input_token,
+                                                    slippage_base_pct=settings.execution.slippage_base_pct * 2,  # Double slippage for emergency
+                                                    anti_mev=settings.execution.gmgn_anti_mev, priority_fee_sol=settings.execution.sol_priority_fee_sol)
+                                res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""), from_address=(settings.solana.address or ""), dry_run=False)
+                                realized = sum((x.get("realized_out") or 0) for x in res.get("results", []))
+                                reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=None, realized_out_wsol=realized,
+                                              slippage_pct=None, amm_pi_pct=None,
+                                              tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None),
+                                              reason="emergency_quote_failure")
+                                _record_exit_to_cb(invested, realized, sell_qty, qty, contract)
+                                await send_alert(f"🚨 Emergency exit {symbol} after {quote_failures} quote failures")
+                            except Exception as e:
+                                logger.error(f"Emergency exit failed for {symbol}: {e}")
+                            continue
+
+                        # Not yet at emergency threshold, save and skip
+                        update_position_meta(pos["id"], meta)
                         continue
+                    else:
+                        # Quote succeeded, reset failure counter
+                        if meta.get("quote_failures", 0) > 0:
+                            meta["quote_failures"] = 0
+                            update_position_meta(pos["id"], meta)
 
                     current_ret = (exp_wsol - invested) / max(1e-9, invested) if invested>0 else 0.0
                     # HWM update
@@ -303,6 +339,9 @@ class Orchestrator:
 
                     downgrade = False
                     if should_check_downgrade:
+                        # BUG FIX #24: Update last_check_ts BEFORE LLM call to prevent race condition
+                        mark_position_check(pos["id"], None, None, None, None)  # Updates last_check_ts
+
                         hype_val, hype_meta = self.hype.hype_score(symbol)
                         z_sum = (hype_meta.get("z_m",0)+hype_meta.get("z_a",0)+hype_meta.get("z_e",0))
                         nitems = self.news_cache.get(symbol, [])
@@ -364,14 +403,20 @@ class Orchestrator:
                         res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""), from_address=(settings.solana.address or ""), dry_run=False)
                         realized = sum((x.get("realized_out") or 0) for x in res.get("results", []))
                         reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=expected_out_portion, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="tp1")
-                        _record_exit_to_cb(invested, realized, sell_qty, qty, contract)  # Record to CB
                         tp1_done = True
                         # BUG FIX #16: Update local variables after partial exit
+                        # CRITICAL: Calculate invested_portion BEFORE updating qty
+                        qty_before_exit = qty
+                        invested_portion = invested * (sell_qty / qty_before_exit)  # Invested for sold portion
                         qty = qty - sell_qty
                         exp_wsol = exp_wsol - expected_out_portion  # Update exp_wsol for remaining qty
-                        invested_portion = invested * (sell_qty / (qty + sell_qty))  # Invested for sold portion
                         invested = invested - invested_portion  # Update invested for remaining
+                        # BUG FIX #31: Prevent negative values from rounding errors
+                        qty = max(0.0, qty)
+                        exp_wsol = max(0.0, exp_wsol)
+                        invested = max(0.0, invested)
                         current_ret = (exp_wsol - invested) / max(1e-9, invested) if invested > 0 else 0.0  # Recalculate
+                        _record_exit_to_cb(invested, realized, sell_qty, qty_before_exit, contract)  # Record to CB with qty BEFORE exit
                         # BUG FIX #23: Persist tp1_done flag immediately to prevent duplicate TP1 execution
                         mark_position_check(pos["id"], None, None, tp1_done, None)
                         try: await send_alert(f"🎯 TP1 exit 30% {symbol}")
@@ -386,14 +431,20 @@ class Orchestrator:
                         res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""), from_address=(settings.solana.address or ""), dry_run=False)
                         realized = sum((x.get("realized_out") or 0) for x in res.get("results", []))
                         reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=expected_out_portion, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="tp2")
-                        _record_exit_to_cb(invested, realized, sell_qty, qty, contract)  # Record to CB with correct qty
                         tp2_done = True
                         # BUG FIX #16: Update local variables after partial exit
+                        # CRITICAL: Calculate invested_portion BEFORE updating qty
+                        qty_before_exit = qty
+                        invested_portion = invested * (sell_qty / qty_before_exit)  # Invested for sold portion
                         qty = qty - sell_qty
                         exp_wsol = exp_wsol - expected_out_portion  # Update exp_wsol for remaining qty
-                        invested_portion = invested * (sell_qty / (qty + sell_qty))  # Invested for sold portion
                         invested = invested - invested_portion  # Update invested for remaining
+                        # BUG FIX #31: Prevent negative values from rounding errors
+                        qty = max(0.0, qty)
+                        exp_wsol = max(0.0, exp_wsol)
+                        invested = max(0.0, invested)
                         current_ret = (exp_wsol - invested) / max(1e-9, invested) if invested > 0 else 0.0  # Recalculate
+                        _record_exit_to_cb(invested, realized, sell_qty, qty_before_exit, contract)  # Record to CB with qty BEFORE exit
                         # BUG FIX #23: Persist tp2_done flag immediately to prevent duplicate TP2 execution
                         mark_position_check(pos["id"], None, None, None, tp2_done)
                         try: await send_alert(f"🎯 TP2 exit 30% {symbol}")
@@ -457,5 +508,33 @@ class Orchestrator:
             try:
                 await asyncio.sleep(300)  # Сохраняем каждые 5 минут
                 self.hype.save_state()
-            except Exception:
-                pass
+            except Exception as e:
+                # BUG FIX #35: Log errors instead of silent failures
+                logger.error(f"Failed to save hype state: {e}")
+                try:
+                    await send_alert(f"⚠️ Hype state save error: {e}")
+                except:
+                    pass
+
+    async def _cleanup_caches(self):
+        """BUG FIX #36: Периодически очищает старые записи из кешей для предотвращения утечки памяти."""
+        while True:
+            try:
+                await asyncio.sleep(3600)  # Очищаем каждый час
+                # Оставляем только последние 100 символов в market_cache
+                if len(self.market_cache) > 100:
+                    # Удаляем старые записи, оставляем 100 последних
+                    sorted_keys = sorted(self.market_cache.keys())
+                    for key in sorted_keys[:-100]:
+                        del self.market_cache[key]
+                    logger.info(f"Cleaned market_cache, kept 100 most recent entries")
+
+                # Очищаем news_cache для символов без открытых позиций
+                open_symbols = {pos["symbol"] for pos in get_open_positions()}
+                symbols_to_remove = [sym for sym in self.news_cache.keys() if sym not in open_symbols and len(self.news_cache[sym]) > 50]
+                for sym in symbols_to_remove:
+                    del self.news_cache[sym]
+                if symbols_to_remove:
+                    logger.info(f"Cleaned news_cache, removed {len(symbols_to_remove)} stale entries")
+            except Exception as e:
+                logger.error(f"Cache cleanup error: {e}")

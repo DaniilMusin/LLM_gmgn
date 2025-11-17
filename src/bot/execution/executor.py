@@ -4,6 +4,7 @@ from ..config import settings
 from ..utils.alerts import send_alert
 from ..utils.db import save_quote, save_trade
 from ..utils.amm_decode import estimate_pool_price_impact
+from ..utils.logging import logger
 import httpx, math
 async def _fetch_solana_tx(sig: str) -> dict | None:
     url = settings.solana.rpc_url
@@ -60,7 +61,7 @@ async def execute_sol(plan: ExecutionPlan, *, payer_b58: str, from_address: str,
             sent = await gmgn_send_tx_sol(signed_b64, anti_mev=plan.anti_mev)
             txsig = sent.get("data",{}).get("hash")
             status = await gmgn_poll_status(txsig, last_h)
-            realized = None; dec = 0
+            realized = None; dec = 0; amm_pi = None
             try:
                 txres = await _fetch_solana_tx(txsig)
                 if txres and txres.get("meta"):
@@ -75,9 +76,12 @@ async def execute_sol(plan: ExecutionPlan, *, payer_b58: str, from_address: str,
                         realized = 0.0  # Still cap at zero for downstream logic
                     amm_pi, _det = estimate_pool_price_impact(txres["meta"], trader_owner=from_address)
                 else:
-                    amm_pi = None
-            except Exception:
-                amm_pi = None
+                    # No meta available, assume failed quote
+                    realized = 0.0
+            except Exception as e:
+                # BUG FIX #37: Log errors and set realized to 0 on failure
+                logger.error(f"Failed to get tx details for {txsig}: {e}")
+                realized = 0.0  # Assume worst case for stats
             slip_pct = None
             if exp_out is not None and realized is not None:
                 try: slip_pct = (exp_out - realized) / max(1e-9, exp_out) * 100.0
