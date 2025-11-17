@@ -1,0 +1,4 @@
+perplexity:
+  api_keys:
+    - "pplx-..."  # добавьте несколько ключей Perplexity для ротации
+    - "pplx-..."
