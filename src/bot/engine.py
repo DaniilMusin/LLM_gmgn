@@ -372,6 +372,8 @@ class Orchestrator:
                         invested_portion = invested * (sell_qty / (qty + sell_qty))  # Invested for sold portion
                         invested = invested - invested_portion  # Update invested for remaining
                         current_ret = (exp_wsol - invested) / max(1e-9, invested) if invested > 0 else 0.0  # Recalculate
+                        # BUG FIX #23: Persist tp1_done flag immediately to prevent duplicate TP1 execution
+                        mark_position_check(pos["id"], None, None, tp1_done, None)
                         try: await send_alert(f"🎯 TP1 exit 30% {symbol}")
                         except Exception: pass
                     if not tp2_done and current_ret >= 0.35:
@@ -392,6 +394,8 @@ class Orchestrator:
                         invested_portion = invested * (sell_qty / (qty + sell_qty))  # Invested for sold portion
                         invested = invested - invested_portion  # Update invested for remaining
                         current_ret = (exp_wsol - invested) / max(1e-9, invested) if invested > 0 else 0.0  # Recalculate
+                        # BUG FIX #23: Persist tp2_done flag immediately to prevent duplicate TP2 execution
+                        mark_position_check(pos["id"], None, None, None, tp2_done)
                         try: await send_alert(f"🎯 TP2 exit 30% {symbol}")
                         except Exception: pass
                     # Trailing stop (remaining)
