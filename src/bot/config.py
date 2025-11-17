@@ -28,6 +28,8 @@ class ExecConf(BaseModel):
     slippage_base_pct: float = 30.0
     split_threshold_price_impact_pct: float = 15.0
     max_splits: int = 3
+    # BUG FIX #32: Make WSOL/USDC rate configurable instead of hardcoded
+    wsol_usdc_rate: float = 150.0  # Approximate USDC per WSOL for risk calculations
 
     # BUG FIX #21: Add config validation
     @field_validator('slippage_base_pct')
