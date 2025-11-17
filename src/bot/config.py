@@ -1,6 +1,6 @@
 from __future__ import annotations
 import os, yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 DEFAULT_CFG = os.environ.get("CONFIG_PATH", "config/config.yaml")
 
 class PerplexityConf(BaseModel):
@@ -28,6 +28,21 @@ class ExecConf(BaseModel):
     slippage_base_pct: float = 30.0
     split_threshold_price_impact_pct: float = 15.0
     max_splits: int = 3
+
+    # BUG FIX #21: Add config validation
+    @field_validator('slippage_base_pct')
+    @classmethod
+    def validate_slippage(cls, v: float) -> float:
+        if v <= 0 or v > 100:
+            raise ValueError(f"slippage_base_pct must be between 0 and 100, got {v}")
+        return v
+
+    @field_validator('max_splits')
+    @classmethod
+    def validate_max_splits(cls, v: int) -> int:
+        if v < 1 or v > 10:
+            raise ValueError(f"max_splits must be between 1 and 10, got {v}")
+        return v
 
 class FeaturesConf(BaseModel):
     hype_window_secs: int = 900
@@ -66,6 +81,28 @@ class RiskConf(BaseModel):
     max_open_positions: int = 5  # максимум открытых позиций одновременно
     max_portfolio_risk_wsol: float = 2.0  # максимальный суммарный риск портфеля
     max_position_size_pct: float = 0.3  # максимум 30% портфеля на одну позицию
+
+    # BUG FIX #21: Add config validation
+    @field_validator('circuit_breaker_loss_threshold_pct')
+    @classmethod
+    def validate_loss_threshold(cls, v: float) -> float:
+        if v <= 0 or v > 1.0:
+            raise ValueError(f"circuit_breaker_loss_threshold_pct must be between 0 and 1.0, got {v}")
+        return v
+
+    @field_validator('max_position_size_pct')
+    @classmethod
+    def validate_position_size(cls, v: float) -> float:
+        if v <= 0 or v > 1.0:
+            raise ValueError(f"max_position_size_pct must be between 0 and 1.0, got {v}")
+        return v
+
+    @field_validator('max_open_positions')
+    @classmethod
+    def validate_max_positions(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"max_open_positions must be at least 1, got {v}")
+        return v
 
 class WebConf(BaseModel):
     host: str = "0.0.0.0"

@@ -364,7 +364,12 @@ class Orchestrator:
                         reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=expected_out_portion, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="tp1")
                         _record_exit_to_cb(invested, realized, sell_qty, qty, contract)  # Record to CB
                         tp1_done = True
-                        qty = qty - sell_qty  # Update local qty for next checks
+                        # BUG FIX #16: Update local variables after partial exit
+                        qty = qty - sell_qty
+                        exp_wsol = exp_wsol - expected_out_portion  # Update exp_wsol for remaining qty
+                        invested_portion = invested * (sell_qty / (qty + sell_qty))  # Invested for sold portion
+                        invested = invested - invested_portion  # Update invested for remaining
+                        current_ret = (exp_wsol - invested) / max(1e-9, invested) if invested > 0 else 0.0  # Recalculate
                         try: await send_alert(f"🎯 TP1 exit 30% {symbol}")
                         except Exception: pass
                     if not tp2_done and current_ret >= 0.35:
@@ -379,7 +384,12 @@ class Orchestrator:
                         reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=expected_out_portion, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="tp2")
                         _record_exit_to_cb(invested, realized, sell_qty, qty, contract)  # Record to CB with correct qty
                         tp2_done = True
-                        qty = qty - sell_qty  # Update local qty for next checks
+                        # BUG FIX #16: Update local variables after partial exit
+                        qty = qty - sell_qty
+                        exp_wsol = exp_wsol - expected_out_portion  # Update exp_wsol for remaining qty
+                        invested_portion = invested * (sell_qty / (qty + sell_qty))  # Invested for sold portion
+                        invested = invested - invested_portion  # Update invested for remaining
+                        current_ret = (exp_wsol - invested) / max(1e-9, invested) if invested > 0 else 0.0  # Recalculate
                         try: await send_alert(f"🎯 TP2 exit 30% {symbol}")
                         except Exception: pass
                     # Trailing stop (remaining)
