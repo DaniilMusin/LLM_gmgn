@@ -57,14 +57,16 @@ def test_circuit_breaker_opens_on_max_drawdown(temp_data_dir):
     """Тест что circuit breaker открывается при превышении max drawdown."""
     reset_circuit_breaker()
 
-    # Делаем несколько небольших профитов
+    # Делаем несколько небольших сделок чтобы достичь минимума (5 trades)
     record_trade(0.01, "contract_1")
     record_trade(0.01, "contract_2")
+    record_trade(0.01, "contract_3")
+    record_trade(0.01, "contract_4")
 
     # И одна большая просадка
-    record_trade(-0.6, "contract_3")  # Больше max_drawdown (0.5 WSOL)
+    record_trade(-0.6, "contract_5")  # Больше max_drawdown (0.5 WSOL)
 
-    # Circuit breaker должен открыться
+    # Circuit breaker должен открыться (total P/L = 0.04 - 0.6 = -0.56 < -0.5)
     is_open, reason = is_circuit_open()
     assert is_open is True
 
