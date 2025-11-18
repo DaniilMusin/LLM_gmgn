@@ -10,8 +10,9 @@ class PerplexityConf(BaseModel):
 
 class OpenAIConf(BaseModel):
     api_key: str | None = None
-    model_fast: str = "gpt-5-mini"
-    model_final: str = "gpt-5"
+    # BUG FIX #68: Use valid OpenAI model names (gpt-5 doesn't exist)
+    model_fast: str = "gpt-4o-mini"
+    model_final: str = "gpt-4o"
 
 class SolanaConf(BaseModel):
     private_key_b58: str | None = None

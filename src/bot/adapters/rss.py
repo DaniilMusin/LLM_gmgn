@@ -23,10 +23,9 @@ def _parse_feed(url: str):
 async def poll_rss(interval=60) -> AsyncIterator[NewsItem]:
     if not FEEDPARSER_AVAILABLE:
         from ..utils.logging import logger
-        logger.warning("feedparser not available, RSS feeds disabled")
-        while True:
-            await asyncio.sleep(interval)
-            continue
+        logger.error("feedparser not available, RSS feeds permanently disabled")
+        # BUG FIX #63: Exit generator instead of infinite loop doing nothing
+        return
     seen = set(); feeds = [COINDESK_RSS, COINTELE_RSS, DECRYPT_RSS]
     while True:
         for url in feeds:
@@ -51,10 +50,9 @@ def google_news_rss(query: str, hl="en-US", gl="US", ceid="US:en") -> str:
 async def poll_google_news(queries: list[str], hl="en-US", gl="US", ceid="US:en", interval=300):
     if not FEEDPARSER_AVAILABLE:
         from ..utils.logging import logger
-        logger.warning("feedparser not available, Google News disabled")
-        while True:
-            await asyncio.sleep(interval)
-            continue
+        logger.error("feedparser not available, Google News permanently disabled")
+        # BUG FIX #63: Exit generator instead of infinite loop doing nothing
+        return
     seen = set()
     while True:
         for q in queries:

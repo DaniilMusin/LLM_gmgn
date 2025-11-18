@@ -74,6 +74,7 @@ async def execute_sol(plan: ExecutionPlan, *, payer_b58: str, from_address: str,
             txsig = sent.get("data",{}).get("hash")
             status = await gmgn_poll_status(txsig, last_h)
             realized = None; dec = 0; amm_pi = None
+            tx_successful = status.get("data", {}).get("success") if isinstance(status.get("data"), dict) else False
             try:
                 txres = await _fetch_solana_tx(txsig)
                 if txres and txres.get("meta"):
@@ -88,12 +89,25 @@ async def execute_sol(plan: ExecutionPlan, *, payer_b58: str, from_address: str,
                         realized = 0.0  # Still cap at zero for downstream logic
                     amm_pi, _det = estimate_pool_price_impact(txres["meta"], trader_owner=from_address)
                 else:
-                    # No meta available, assume failed quote
-                    realized = 0.0
+                    # BUG FIX #67: If tx succeeded but balance extraction failed, mark for reconciliation
+                    if tx_successful:
+                        try:
+                            await send_alert(f"⚠️ TX {txsig} succeeded but balance unknown - manual reconciliation needed")
+                        except Exception: pass
+                        realized = None  # Use None to indicate unknown (not zero)
+                    else:
+                        # Transaction failed, zero is correct
+                        realized = 0.0
             except Exception as e:
-                # BUG FIX #37: Log errors and set realized to 0 on failure
+                # BUG FIX #67: Only set to 0 if tx actually failed, otherwise mark for reconciliation
                 logger.error(f"Failed to get tx details for {txsig}: {e}")
-                realized = 0.0  # Assume worst case for stats
+                if tx_successful:
+                    try:
+                        await send_alert(f"⚠️ TX {txsig} succeeded but balance extraction failed: {e} - manual reconciliation needed")
+                    except Exception: pass
+                    realized = None  # Unknown balance, needs reconciliation
+                else:
+                    realized = 0.0  # Transaction failed, zero is correct
             slip_pct = None
             if exp_out is not None and realized is not None:
                 try: slip_pct = (exp_out - realized) / max(1e-9, exp_out) * 100.0
