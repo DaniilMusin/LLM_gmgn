@@ -27,5 +27,8 @@ async def stream_bluesky() -> AsyncIterator[SocialPost]:
                                      url=f"https://bsky.app/profile/{evt.get('did')}/post/{c.get('rkey')}",
                                      symbols=syms, lang=None, engagement={})
                 backoff = 1
-        except Exception:
+        except Exception as e:
+            # BUG FIX #46: Log websocket errors to track connection issues
+            from ..utils.logging import logger
+            logger.error(f"Bluesky jetstream error: {e}. Reconnecting in {min(30, backoff)}s...")
             await asyncio.sleep(min(30, backoff)); backoff *= 2

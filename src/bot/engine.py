@@ -251,6 +251,9 @@ class Orchestrator:
                     exp_wsol = 0.0
                     quote_failed = False
                     try:
+                        # BUG FIX #47: Validate decimals before using in calculations
+                        if decimals is None or decimals < 0 or decimals > 18:
+                            decimals = 9  # Safe default for most Solana tokens
                         amt = int(qty * (10**decimals))
                         r = await gmgn_get_route_sol(contract, WSOL, amt, from_addr=(settings.solana.address or ""), slippage_pct=settings.execution.slippage_base_pct)
                         q = (r.get("data") or {}).get("quote", {}) or {}

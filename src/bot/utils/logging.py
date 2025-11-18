@@ -1,6 +1,13 @@
-import os, pandas as pd
+import os, pandas as pd, logging
 from datetime import datetime, timezone
 from ..config import settings
+
+# BUG FIX #53: Add missing logger object
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 def _ensure_dir(path: str): os.makedirs(path, exist_ok=True)
 def log_signal(record: dict, *, fname_csv: str = "signals.csv", fname_parquet: str = "signals.parquet"):
     out_dir = settings.logging.out_dir; _ensure_dir(out_dir)

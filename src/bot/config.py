@@ -46,6 +46,21 @@ class ExecConf(BaseModel):
             raise ValueError(f"max_splits must be between 1 and 10, got {v}")
         return v
 
+    # BUG FIX #61: Add validation to prevent division by zero
+    @field_validator('wsol_usdc_rate')
+    @classmethod
+    def validate_wsol_usdc_rate(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"wsol_usdc_rate must be positive, got {v}")
+        return v
+
+    @field_validator('split_threshold_price_impact_pct')
+    @classmethod
+    def validate_split_threshold(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError(f"split_threshold_price_impact_pct must be non-negative, got {v}")
+        return v
+
 class FeaturesConf(BaseModel):
     hype_window_secs: int = 900
 
