@@ -32,9 +32,13 @@ def _load_state() -> dict:
         }
 
 def _save_state(state: dict):
+    # BUG FIX #57: Use atomic write to prevent file corruption in critical safety component
     try:
-        with open(_cb_path(), "w", encoding="utf-8") as f:
+        cb_path = _cb_path()
+        temp_path = cb_path + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
+        os.replace(temp_path, cb_path)  # Atomic on POSIX systems
     except Exception:
         pass
 

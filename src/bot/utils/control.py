@@ -24,7 +24,11 @@ def _save(data: dict):
     d = dict(_DEFAULT); d.update(data)
     s = dict(_DEFAULT["sources"]); s.update(d.get("sources", {}))
     d["sources"] = s
-    json.dump(d, open(PATH,"w",encoding="utf-8"))
+    # BUG FIX #55: Use atomic write to prevent file corruption
+    temp_path = PATH + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(d, f)
+    os.replace(temp_path, PATH)  # Atomic on POSIX systems
 def get_state() -> dict:
     with _CONTROL_LOCK:
         return _load()

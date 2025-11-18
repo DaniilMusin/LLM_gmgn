@@ -14,7 +14,12 @@ class PPLXKeyRing:
         try: self.state = json.load(open(STATE_PATH, "r", encoding="utf-8"))
         except Exception: self.state = {"current_idx": 0, "keys": []}
     def _save_state(self):
-        try: json.dump(self.state, open(STATE_PATH, "w", encoding="utf-8"))
+        # BUG FIX #56: Use atomic write to prevent file corruption
+        try:
+            temp_path = STATE_PATH + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(self.state, f)
+            os.replace(temp_path, STATE_PATH)  # Atomic on POSIX systems
         except Exception: pass
     def _reload_keys_file(self):
         keys = load_keys("perplexity"); prev = {k.get("key"): k for k in self.state.get("keys", [])}

@@ -33,8 +33,11 @@ async def execute_sol(plan: ExecutionPlan, *, payer_b58: str, from_address: str,
     pi = float(q0.get("priceImpact", 0) or q0.get("price_impact", 0) or 0)
     splits = [int(plan.amount_in)]
     # BUG FIX #45: Validate splits to prevent invalid or negative values
+    # BUG FIX #60: Prevent division by zero in split calculations
     if pi > settings.execution.split_threshold_price_impact_pct and settings.execution.max_splits > 1:
-        k = min(settings.execution.max_splits, max(2, math.ceil(pi / settings.execution.split_threshold_price_impact_pct)))
+        threshold = max(0.1, settings.execution.split_threshold_price_impact_pct)  # Prevent division by zero
+        k = min(settings.execution.max_splits, max(2, math.ceil(pi / threshold)))
+        k = max(1, k)  # Ensure k is at least 1
         part = int(int(plan.amount_in) / k)
         # Ensure part is positive and last split is positive
         if part > 0:
