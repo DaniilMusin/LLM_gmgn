@@ -1,16 +1,32 @@
-import asyncio, feedparser, time, re
+import asyncio, time, re
 from datetime import datetime, timezone
 from typing import AsyncIterator
 from urllib.parse import quote_plus
 from ..models import NewsItem
+
+# BUG FIX #54: Make feedparser optional to allow bot to run without RSS
+try:
+    import feedparser
+    FEEDPARSER_AVAILABLE = True
+except ImportError:
+    FEEDPARSER_AVAILABLE = False
+    feedparser = None
 COINDESK_RSS = "https://www.coindesk.com/arc/outboundfeeds/rss/"
 COINTELE_RSS = "https://cointelegraph.com/rss"
 DECRYPT_RSS  = "https://decrypt.co/feed"
 def _parse_feed(url: str):
+    if not FEEDPARSER_AVAILABLE:
+        return []
     feed = feedparser.parse(url)
     for e in feed.entries:
         yield {"title": getattr(e, "title", ""), "link": getattr(e, "link", ""), "published": getattr(e, "published_parsed", None)}
 async def poll_rss(interval=60) -> AsyncIterator[NewsItem]:
+    if not FEEDPARSER_AVAILABLE:
+        from ..utils.logging import logger
+        logger.warning("feedparser not available, RSS feeds disabled")
+        while True:
+            await asyncio.sleep(interval)
+            continue
     seen = set(); feeds = [COINDESK_RSS, COINTELE_RSS, DECRYPT_RSS]
     while True:
         for url in feeds:
@@ -33,6 +49,12 @@ async def poll_rss(interval=60) -> AsyncIterator[NewsItem]:
 def google_news_rss(query: str, hl="en-US", gl="US", ceid="US:en") -> str:
     return f"https://news.google.com/rss/search?q={quote_plus(query)}&hl={hl}&gl={gl}&ceid={ceid}"
 async def poll_google_news(queries: list[str], hl="en-US", gl="US", ceid="US:en", interval=300):
+    if not FEEDPARSER_AVAILABLE:
+        from ..utils.logging import logger
+        logger.warning("feedparser not available, Google News disabled")
+        while True:
+            await asyncio.sleep(interval)
+            continue
     seen = set()
     while True:
         for q in queries:

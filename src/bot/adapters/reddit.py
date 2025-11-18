@@ -1,12 +1,28 @@
-import asyncio, feedparser, time, re
+import asyncio, time, re
 from datetime import datetime, timezone
 from typing import AsyncIterator, List
 from ..models import SocialPost
+
+# BUG FIX #54: Make feedparser optional for reddit too
+try:
+    import feedparser
+    FEEDPARSER_AVAILABLE = True
+except ImportError:
+    FEEDPARSER_AVAILABLE = False
+    feedparser = None
 def _parse_feed(url: str):
+    if not FEEDPARSER_AVAILABLE:
+        return []
     feed = feedparser.parse(url)
     for e in feed.entries:
         yield {"title": getattr(e, "title", ""), "link": getattr(e, "link", ""), "published": getattr(e, "published_parsed", None)}
 async def poll_reddit_subs(subs: List[str], interval=60) -> AsyncIterator[SocialPost]:
+    if not FEEDPARSER_AVAILABLE:
+        from ..utils.logging import logger
+        logger.warning("feedparser not available, Reddit RSS feeds disabled")
+        while True:
+            await asyncio.sleep(interval)
+            continue
     seen=set()
     while True:
         for sub in subs:
