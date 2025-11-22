@@ -167,7 +167,7 @@ class Orchestrator:
                     continue
                 signal = to_trade_signal(dec, dscore)
                 if not signal: continue
-                from .execution.plan import to_execution_plan
+                # BUG FIX #66: Remove redundant import (already imported at line 17)
                 plan = to_execution_plan(dec, in_asset=settings.execution.default_input_token,
                                          size_sol=get_size_sol(), size_usdc=get_size_usdc(),
                                          anti_mev=settings.execution.gmgn_anti_mev, priority_fee_sol=settings.execution.sol_priority_fee_sol)
@@ -244,6 +244,13 @@ class Orchestrator:
                     qty = float(pos["qty"] or 0.0)
                     if qty <= 1e-12: continue
                     invested = float(pos["invested_wsol"] or 0.0)
+                    # LOGIC FIX #1: Get original invested from meta for TP threshold calculations
+                    meta = {}
+                    try:
+                        meta = json.loads(pos["meta_json"] or "{}")
+                    except Exception:
+                        meta = {}
+                    original_invested = float(meta.get("original_invested_wsol", invested))
                     decimals = int(pos["decimals"] or 9)
                     max_hold_sec = int(pos["max_hold_sec"] or 0)
                     opened_at = pos["opened_at"]
@@ -310,10 +317,12 @@ class Orchestrator:
                             update_position_meta(pos["id"], meta)
 
                     current_ret = (exp_wsol - invested) / max(1e-9, invested) if invested>0 else 0.0
+                    # LOGIC FIX #1: Calculate TP thresholds relative to ORIGINAL investment
+                    original_current_ret = (exp_wsol - original_invested) / max(1e-9, original_invested) if original_invested>0 else 0.0
                     # HWM update
                     hwm_wsol = float(pos["hwm_wsol"] or 0.0)
                     new_hwm_wsol = max(hwm_wsol, exp_wsol)
-                    high_ret = (new_hwm_wsol - invested) / max(1e-9, invested) if invested>0 else 0.0
+                    high_ret = (new_hwm_wsol - original_invested) / max(1e-9, original_invested) if original_invested>0 else 0.0
                     steps = int(max(0.0, high_ret) // 0.05)
                     trail_pct = max(0.08, 0.12 - 0.02 * steps)
                     drawdown = (new_hwm_wsol - exp_wsol) / max(1e-9, new_hwm_wsol) if new_hwm_wsol>0 else 0.0
@@ -397,7 +406,12 @@ class Orchestrator:
                             except Exception: pass
                             continue
                     # TP ladder
-                    if not tp1_done and current_ret >= 0.15:
+                    # LOGIC FIX #1: Use original_current_ret for threshold checks
+                    if not tp1_done and original_current_ret >= 0.15:
+                        # BUG FIX #65: Mark tp1_done BEFORE executing to prevent race condition
+                        mark_position_check(pos["id"], None, None, True, None)
+                        tp1_done = True
+
                         sell_qty = qty * 0.30
                         expected_out_portion = exp_wsol * (sell_qty / qty)  # Correct proportion
                         plan = to_exit_plan(symbol, contract, sell_qty, decimals, out_asset=settings.execution.default_input_token,
@@ -406,7 +420,6 @@ class Orchestrator:
                         res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""), from_address=(settings.solana.address or ""), dry_run=False)
                         realized = sum((x.get("realized_out") or 0) for x in res.get("results", []))
                         reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=expected_out_portion, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="tp1")
-                        tp1_done = True
                         # BUG FIX #16: Update local variables after partial exit
                         # CRITICAL: Calculate invested_portion BEFORE updating qty
                         qty_before_exit = qty
@@ -420,11 +433,14 @@ class Orchestrator:
                         invested = max(0.0, invested)
                         current_ret = (exp_wsol - invested) / max(1e-9, invested) if invested > 0 else 0.0  # Recalculate
                         _record_exit_to_cb(invested, realized, sell_qty, qty_before_exit, contract)  # Record to CB with qty BEFORE exit
-                        # BUG FIX #23: Persist tp1_done flag immediately to prevent duplicate TP1 execution
-                        mark_position_check(pos["id"], None, None, tp1_done, None)
                         try: await send_alert(f"🎯 TP1 exit 30% {symbol}")
                         except Exception: pass
-                    if not tp2_done and current_ret >= 0.35:
+                    # LOGIC FIX #1: Use original_current_ret for threshold checks
+                    if not tp2_done and original_current_ret >= 0.35:
+                        # BUG FIX #65: Mark tp2_done BEFORE executing to prevent race condition
+                        mark_position_check(pos["id"], None, None, None, True)
+                        tp2_done = True
+
                         sell_qty = qty * 0.30  # 30% of REMAINING qty
                         # BUG FIX #10: Use correct proportion calculation (same as TP1)
                         expected_out_portion = exp_wsol * (sell_qty / qty)
@@ -434,7 +450,6 @@ class Orchestrator:
                         res = await execute_sol(plan, payer_b58=(settings.solana.private_key_b58 or ""), from_address=(settings.solana.address or ""), dry_run=False)
                         realized = sum((x.get("realized_out") or 0) for x in res.get("results", []))
                         reduce_position(pos["id"], qty_sold=sell_qty, expected_out_wsol=expected_out_portion, realized_out_wsol=realized, slippage_pct=None, amm_pi_pct=None, tx=(res.get("results",[{}])[0].get("tx") if res.get("results") else None), reason="tp2")
-                        tp2_done = True
                         # BUG FIX #16: Update local variables after partial exit
                         # CRITICAL: Calculate invested_portion BEFORE updating qty
                         qty_before_exit = qty
@@ -448,8 +463,6 @@ class Orchestrator:
                         invested = max(0.0, invested)
                         current_ret = (exp_wsol - invested) / max(1e-9, invested) if invested > 0 else 0.0  # Recalculate
                         _record_exit_to_cb(invested, realized, sell_qty, qty_before_exit, contract)  # Record to CB with qty BEFORE exit
-                        # BUG FIX #23: Persist tp2_done flag immediately to prevent duplicate TP2 execution
-                        mark_position_check(pos["id"], None, None, None, tp2_done)
                         try: await send_alert(f"🎯 TP2 exit 30% {symbol}")
                         except Exception: pass
                     # Trailing stop (remaining)

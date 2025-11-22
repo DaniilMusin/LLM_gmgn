@@ -9,7 +9,8 @@ def _db_path():
     out = settings.logging.out_dir; os.makedirs(out, exist_ok=True); return os.path.join(out, "trader.db")
 
 def _conn():
-    conn = sqlite3.connect(_db_path(), check_same_thread=False)
+    # ISSUE #2: Add timeout to prevent indefinite hangs if DB is locked
+    conn = sqlite3.connect(_db_path(), check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     return conn
@@ -138,6 +139,7 @@ def upsert_position_on_buy(symbol: str, contract: str, qty_added: float, cost_ws
         try:
             row = conn.execute("SELECT * FROM positions WHERE contract=? AND state='open'", (contract,)).fetchone()
             ts = datetime.now(timezone.utc).isoformat()
+            # LOGIC FIX #1: Store original invested_wsol in meta for TP threshold calculations
             meta = {"kill_switch": kill_switch or []}
             # BUG FIX #27: Use Solana standard 9 decimals if not provided, validate range
             if decimals is None:
@@ -146,6 +148,8 @@ def upsert_position_on_buy(symbol: str, contract: str, qty_added: float, cost_ws
                 raise ValueError(f"Invalid decimals {decimals}, must be 0-18")
             if row is None:
                 avg = cost_wsol_added / max(1e-12, qty_added)
+                # LOGIC FIX #1: Save original invested amount
+                meta["original_invested_wsol"] = cost_wsol_added
                 cur = conn.execute("""
 INSERT INTO positions(symbol,contract,side,qty,invested_wsol,avg_entry_wsol,opened_at,max_hold_sec,hwm_wsol,hwm_return,tp1_done,tp2_done,decimals,entry_txns_h1,owner_address,meta_json,state,last_check_ts)
 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)

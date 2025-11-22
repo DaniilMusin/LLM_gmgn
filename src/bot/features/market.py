@@ -12,6 +12,9 @@ def market_score(liq_usd: float, vol_1h: float, ret_5m: float | None,
             base -= 0.5  # Penalty for no activity - dead token red flag
     if ret_5m is not None: base += 0.4 * ret_5m
     if price_change_1h is not None: base += 0.2 * price_change_1h
-    if spread_bps is not None: base -= 0.2 * max(0.0, spread_bps) / 100.0
+    # BUG FIX #64: Cap spread penalty to prevent unbounded negative scores
+    if spread_bps is not None:
+        penalty = min(10.0, 0.2 * max(0.0, spread_bps) / 100.0)
+        base -= penalty
     base += 0.2 * (max(0.0, liq_usd) ** 0.2)
     return base

@@ -19,10 +19,15 @@ def estimate_pool_price_impact(meta: dict, trader_owner: str | None = None) -> T
     if len(deltas_sorted) < 2: return None, {"reason": "not enough deltas"}
     (mint_a, da), (mint_b, db) = deltas_sorted
     ra_in = pre_by.get(mint_a, 0.0); rb_out = pre_by.get(mint_b, 0.0)
-    if ra_in <= 0 or rb_out <= 0: return None, {"reason": "invalid reserves", "pre": pre_by}
+    # BUG FIX #69: Add minimum threshold to prevent precision loss with tiny reserves
+    MIN_RESERVE = 1e-6
+    if ra_in <= MIN_RESERVE or rb_out <= MIN_RESERVE:
+        return None, {"reason": "reserves too small", "pre": pre_by, "ra_in": ra_in, "rb_out": rb_out}
     price_before = rb_out / ra_in
     ra_in_after = post_by.get(mint_a, 0.0); rb_out_after = post_by.get(mint_b, 0.0)
-    if ra_in_after <= 0 or rb_out_after <= 0: return None, {"reason": "invalid reserves after", "post": post_by}
+    # BUG FIX #69: Apply same threshold check for post-trade reserves
+    if ra_in_after <= MIN_RESERVE or rb_out_after <= MIN_RESERVE:
+        return None, {"reason": "reserves after too small", "post": post_by, "ra_after": ra_in_after, "rb_after": rb_out_after}
     price_after = rb_out_after / ra_in_after
     pi = (price_after - price_before) / price_before * 100.0
     return pi, {"mints":[mint_a,mint_b],"delta":[da,db],"price_before":price_before,"price_after":price_after}

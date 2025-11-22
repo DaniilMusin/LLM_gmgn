@@ -69,6 +69,23 @@ class HypeAggregator:
                     # BUG FIX #6: Use datetime.now(timezone.utc) instead of deprecated utcnow()
                     "saved_at": datetime.now(timezone.utc).isoformat()
                 }
+                # BUG FIX #70: Test serialization before writing to prevent data loss
+                try:
+                    pickle.dumps(state)  # Test if serializable
+                except Exception as ser_err:
+                    from ..utils.logging import logger
+                    logger.error(f"State not serializable: {ser_err}, attempting to save simplified state")
+                    # Fallback: save without posts to preserve rolling_stats at minimum
+                    state = {
+                        "window_secs": int(self.window.total_seconds()),
+                        "posts": {},
+                        "stats_mentions": {k: list(v.buf) for k, v in self.stats_mentions.items()},
+                        "stats_authors": {k: list(v.buf) for k, v in self.stats_authors.items()},
+                        "stats_author_weight": {k: list(v.buf) for k, v in self.stats_author_weight.items()},
+                        "stats_eng": {k: list(v.buf) for k, v in self.stats_eng.items()},
+                        "saved_at": datetime.now(timezone.utc).isoformat(),
+                        "serialization_error": str(ser_err)
+                    }
                 # BUG FIX #49: Use atomic write to prevent file corruption
                 temp_path = self._state_path + ".tmp"
                 with open(temp_path, "wb") as f:

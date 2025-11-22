@@ -26,6 +26,12 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
 
+    # BUG FIX #62: Initialize database before starting
+    from .utils.db import init_db
+    logger.info("Initializing database...")
+    init_db()
+    logger.info("Database initialized successfully")
+
     _orchestrator = Orchestrator()
     try:
         asyncio.run(_orchestrator.run())
