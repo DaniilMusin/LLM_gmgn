@@ -338,7 +338,7 @@ class Orchestrator:
 
                     # Hype downgrade - OPTIMIZED: Only check every 5 minutes to reduce LLM costs
                     from datetime import datetime as _dt, timezone as _tz
-                    last_check_ts = pos.get("last_check_ts")
+                    last_check_ts = pos["last_check_ts"] if pos["last_check_ts"] else None
                     should_check_downgrade = True
                     if last_check_ts:
                         try:

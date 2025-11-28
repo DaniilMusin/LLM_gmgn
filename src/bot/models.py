@@ -73,5 +73,5 @@ class ExecutionPlan(BaseModel):
     tip_fee_sol: float | None = None
     # exit/management
     max_hold_sec: int | None = None
-    kill_switch: list[str] = []
+    kill_switch: list[str] = Field(default_factory=list)
     symbol: str | None = None
