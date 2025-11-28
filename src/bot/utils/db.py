@@ -199,7 +199,7 @@ def mark_position_check(pid: int, hwm_wsol: float | None, hwm_return: float | No
         if tp2_done is not None: sets.append("tp2_done=?"); vals.append(1 if tp2_done else 0)
         sets.append("last_check_ts=?"); vals.append(ts); vals.append(pid)
         # BUG FIX #48: Ensure sets is not empty before executing UPDATE
-        if len(sets) > 1 or (len(sets) == 1 and "last_check_ts" not in sets[0]):
+        if sets:
             conn.execute("UPDATE positions SET "+",".join(sets)+" WHERE id=?", vals)
             conn.commit()
         conn.close()
