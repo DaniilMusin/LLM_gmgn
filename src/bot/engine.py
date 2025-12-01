@@ -37,7 +37,11 @@ class Orchestrator:
         if settings.sources.google_news_enabled: tasks.append(self._run_google_news())
         if settings.sources.farcaster_enabled: tasks.append(self._run_farcaster())
         if settings.sources.reddit_enabled: tasks.append(self._run_reddit())
-        await asyncio.gather(*tasks)
+        # BUG FIX #71: Protect against task failures killing entire bot
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Task {i} failed with exception: {result}")
 
     async def _run_bluesky(self):
         async for post in stream_bluesky():

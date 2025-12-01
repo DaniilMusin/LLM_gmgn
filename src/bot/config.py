@@ -126,8 +126,9 @@ class WebConf(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8000
     api_token: str | None = None
-    basic_user: str | None = "admin"
-    basic_password: str | None = "admin"
+    # BUG FIX #72: Remove dangerous default credentials - must be set in config
+    basic_user: str | None = None
+    basic_password: str | None = None
 
 class Settings(BaseModel):
     perplexity: PerplexityConf = PerplexityConf()
